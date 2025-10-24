@@ -4,6 +4,7 @@ import pandas as pd
 import shap
 import pickle
 
+# train_model.py（节选修改部分）
 def main():
     df = pd.read_csv('train.csv')
 
@@ -14,7 +15,21 @@ def main():
     X_raw = df[all_cols].copy()
     y = df['age'].values
 
-    # === 1. 手动预处理：One-Hot + 标准化 ===
+    # === 新增：构造非线性特征 ===
+    X_raw['balance_log'] = np.log1p(np.clip(X_raw['balance'], 0, None))
+    X_raw['duration_log'] = np.log1p(np.clip(X_raw['duration'], 0, None))
+    X_raw['campaign_sqrt'] = np.sqrt(np.clip(X_raw['campaign'], 0, None))
+    X_raw['previous_log'] = np.log1p(np.clip(X_raw['previous'], 0, None))
+    X_raw['balance_duration'] = X_raw['balance'] * X_raw['duration']
+    X_raw['duration_per_campaign'] = X_raw['duration'] / (X_raw['campaign'] + 1)
+
+    # 更新特征列表
+    extended_num_cols = num_cols + [
+        'balance_log', 'duration_log', 'campaign_sqrt',
+        'previous_log', 'balance_duration', 'duration_per_campaign'
+    ]
+
+    # === 1. 手动预处理：One-Hot + 标准化（使用 extended_num_cols）===
     cat_encoders = {}
     encoded_features = []
     feature_names = []
@@ -27,26 +42,28 @@ def main():
             encoded_features.append((labels == idx).astype(int).values)
             feature_names.append(f"{col}_{idx}")
 
-    for col in num_cols:
+    for col in extended_num_cols:
         encoded_features.append(X_raw[col].values.astype(float))
         feature_names.append(col)
 
     X = np.column_stack(encoded_features)
-    num_start = len(feature_names) - len(num_cols)
+    num_start = len(feature_names) - len(extended_num_cols)
     num_means = np.nanmean(X[:, num_start:], axis=0)
     num_stds = np.nanstd(X[:, num_start:], axis=0)
     num_stds[num_stds == 0] = 1
     X[:, num_start:] = (X[:, num_start:] - num_means) / num_stds
     X = np.nan_to_num(X)
 
+    # ... 后续训练、SHAP、特征选择、保存逻辑保持不变 ...
+
     # === 2. 梯度下降 + 早停 ===
     n, d = X.shape
     w = np.zeros(d)
     b = 0.0
-    lr = 0.01
-    max_epochs = 2000
+    lr = 0.003
+    max_epochs = 30000
     patience = 50          # 容忍多少轮无显著改进
-    min_delta = 1e-4       # 最小改进阈值
+    min_delta = 3e-4       # 最小改进阈值
     best_loss = float('inf')
     patience_counter = 0
     losses = []
@@ -76,7 +93,7 @@ def main():
         b -= lr * db
 
         # 可选：每 500 轮打印一次
-        if epoch % 5 == 0:
+        if epoch % 500 == 0:
             print(f"Epoch {epoch:4d} | Loss: {loss:.6f}")
 
     print(f"✅ 第一轮训练完成，最终 loss: {loss:.6f}")
@@ -85,7 +102,8 @@ def main():
     def model_predict(X_in):
         return X_in @ w + b
 
-    explainer = shap.Explainer(model_predict, X)
+    # === 3. SHAP 分析：使用 LinearExplainer（推荐）===
+    explainer = shap.LinearExplainer((w, b), X)
     shap_vals = explainer(X)
     shap_imp = np.mean(np.abs(shap_vals.values), axis=0)
 
@@ -121,8 +139,6 @@ def main():
         w2 -= lr * dw
         b2 -= lr * db
 
-        if epoch % 5 == 0:
-            print(f"Epoch {epoch:4d} | Loss: {loss:.6f}")
     print(f"✅ 第二轮训练完成，最终 loss: {loss:.6f}")
 
     # === 6. 保存模型 ===
